@@ -130,6 +130,8 @@ class Window(QMainWindow):
         self.pool.setMaxThreadCount(1)
         self.busy = False
         self.cycle_path = None
+        self.account_editing = {"primary": False, "backup": False}
+        self.account_originals = {}
         self.cycle_started = 0
         self.pending_close = False
         self.last_state = None
@@ -355,7 +357,7 @@ class Window(QMainWindow):
         account.setContentsMargins(24, 22, 24, 22)
         account.setSpacing(11)
         account.addWidget(text("主账号", "sectionTitle"))
-        account.addWidget(text("读取本目录 credentials.txt；点击保存后更新原文件。", "muted"))
+        account.addWidget(text("账号信息默认锁定，点击「编辑」后修改，保存后自动锁定。", "muted"))
         self.username = QLineEdit()
         self.username.setPlaceholderText("校园网账号")
         self.password = QLineEdit()
@@ -370,9 +372,15 @@ class Window(QMainWindow):
         account.addWidget(text("运营商 / 网络服务", "muted"))
         account.addWidget(self.service)
         row = QHBoxLayout()
+        self.edit_account_button = button("编辑")
+        self.edit_account_button.clicked.connect(lambda: self.begin_account_edit("primary"))
+        self.cancel_account_button = button("取消")
+        self.cancel_account_button.clicked.connect(lambda: self.cancel_account_edit("primary"))
+        row.addWidget(self.edit_account_button)
         self.save_account_button = button("保存账号", True)
         self.save_account_button.clicked.connect(self.save_account)
         row.addWidget(self.save_account_button)
+        row.addWidget(self.cancel_account_button)
         row.addStretch()
         account.addLayout(row)
         layout.addWidget(account_card)
@@ -400,11 +408,17 @@ class Window(QMainWindow):
         backup.addWidget(text("备用运营商 / 网络服务", "muted"))
         backup.addWidget(self.backup_service)
         row = QHBoxLayout()
+        self.edit_backup_button = button("编辑")
+        self.edit_backup_button.clicked.connect(lambda: self.begin_account_edit("backup"))
+        self.cancel_backup_button = button("取消")
+        self.cancel_backup_button.clicked.connect(lambda: self.cancel_account_edit("backup"))
+        row.addWidget(self.edit_backup_button)
         self.save_backup_button = button("保存并启用备用账号", True)
         self.save_backup_button.clicked.connect(self.save_backup)
         self.delete_backup_button = button("删除备用账号")
         self.delete_backup_button.clicked.connect(self.delete_backup)
         row.addWidget(self.save_backup_button)
+        row.addWidget(self.cancel_backup_button)
         row.addWidget(self.delete_backup_button)
         row.addStretch()
         backup.addLayout(row)
@@ -450,6 +464,7 @@ class Window(QMainWindow):
         options.addWidget(text("自启动后沿用已保存的自动重连、定时与主备账号设置。", "muted"))
         options.addWidget(text("主账号最多 3 次，备用账号最多 3 次；全部失败后暂停。", "muted"))
         layout.addWidget(policy)
+        self.update_account_controls()
         layout.addStretch()
         self.add_page(page)
 
@@ -514,14 +529,62 @@ class Window(QMainWindow):
         except (OSError, ValueError):
             self.notice.setText("请先在「账号与设置」中配置校园网账号。")
 
+    def account_controls(self, profile):
+        if profile == "primary":
+            return (self.username, self.password, self.service,
+                    self.edit_account_button, self.save_account_button, self.cancel_account_button)
+        return (self.backup_username, self.backup_password, self.backup_service,
+                self.edit_backup_button, self.save_backup_button, self.cancel_backup_button)
+
+    def update_account_controls(self):
+        available = not self.busy and not self.cycle_path
+        for profile, editing in self.account_editing.items():
+            username, password, service, edit, save, cancel = self.account_controls(profile)
+            for field in (username, password):
+                field.setReadOnly(not editing)
+                field.setEnabled(available)
+            service.setEnabled(available and editing)
+            edit.setVisible(not editing)
+            save.setVisible(editing)
+            cancel.setVisible(editing)
+            for control in (edit, save, cancel):
+                control.setEnabled(available)
+        self.delete_backup_button.setEnabled(available and self.account_editing["backup"])
+
+    def begin_account_edit(self, profile):
+        if self.busy or self.cycle_path or self.account_editing[profile]:
+            return
+        username, password, service, *_ = self.account_controls(profile)
+        self.account_originals[profile] = (username.text(), password.text(), service.currentText())
+        self.account_editing[profile] = True
+        self.update_account_controls()
+        username.setFocus()
+
+    def finish_account_edit(self, profile):
+        self.account_editing[profile] = False
+        self.account_originals.pop(profile, None)
+        self.update_account_controls()
+
+    def cancel_account_edit(self, profile):
+        if self.busy or self.cycle_path or not self.account_editing[profile]:
+            return
+        username, password, service, *_ = self.account_controls(profile)
+        original = self.account_originals[profile]
+        username.setText(original[0])
+        password.setText(original[1])
+        service.setCurrentText(original[2])
+        self.finish_account_edit(profile)
+        self.notice.setText("已取消修改，账号信息已锁定。")
+
     def save_account(self):
-        if self.busy or self.cycle_path:
+        if self.busy or self.cycle_path or self.demo or not self.account_editing["primary"]:
             return
         try:
             backend.save_credentials(self.username.text(), self.password.text(), self.service.currentText())
         except (ValueError, OSError):
             self.notice.setText("保存失败，请填写完整账号、密码并检查文件权限。")
             return
+        self.finish_account_edit("primary")
         self.policy.reset()
         self.add_log("账号配置已更新。")
         self.notice.setText("账号已保存；下次连接时使用新配置。")
@@ -550,7 +613,7 @@ class Window(QMainWindow):
         self.auto_detail.setText(value)
 
     def save_backup(self):
-        if self.busy or self.cycle_path or self.demo:
+        if self.busy or self.cycle_path or self.demo or not self.account_editing["backup"]:
             return
         try:
             backend.save_credentials(self.backup_username.text(), self.backup_password.text(),
@@ -560,6 +623,7 @@ class Window(QMainWindow):
         except (ValueError, OSError):
             self.notice.setText("备用账号保存失败，请填写完整账号、密码和运营商。")
             return
+        self.finish_account_edit("backup")
         self.backup_check.blockSignals(True)
         self.backup_check.setChecked(True)
         self.backup_check.blockSignals(False)
@@ -592,7 +656,7 @@ class Window(QMainWindow):
         self.refresh()
 
     def delete_backup(self):
-        if self.busy or self.cycle_path or self.demo:
+        if self.busy or self.cycle_path or self.demo or not self.account_editing["backup"]:
             return
         try:
             backend.BACKUP_PATH.unlink(missing_ok=True)
@@ -604,6 +668,8 @@ class Window(QMainWindow):
         backend.save_settings(self.settings)
         self.backup_username.clear()
         self.backup_password.clear()
+        self.backup_service.setCurrentIndex(0)
+        self.finish_account_edit("backup")
         self.policy.configure_backup(False)
         self.update_auto_detail()
         self.add_log("备用账号已删除。")
@@ -676,11 +742,9 @@ class Window(QMainWindow):
     def set_busy(self, busy):
         self.busy = busy
         for widget in (self.login_button, self.logout_button, self.check_button, self.refresh_button,
-                       self.cycle_button, self.save_account_button, self.username, self.password,
-                       self.service, self.auto_check, self.schedule_check,
-                       self.backup_check, self.backup_username, self.backup_password,
-                       self.backup_service, self.save_backup_button, self.delete_backup_button):
+                       self.cycle_button, self.auto_check, self.schedule_check, self.backup_check):
             widget.setEnabled(not busy and not self.cycle_path)
+        self.update_account_controls()
         if not busy and self.last_state and not self.cycle_path:
             online = self.last_state["online"]
             self.logout_button.setEnabled(online)
