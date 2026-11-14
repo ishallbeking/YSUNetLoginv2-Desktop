@@ -10,6 +10,7 @@ import time
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 import desktop_backend as backend
+import windows_startup
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, Signal, QLockFile
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
@@ -438,6 +439,15 @@ class Window(QMainWindow):
         self.tray_check.setChecked(self.settings["close_to_tray"])
         self.tray_check.toggled.connect(self.tray_changed)
         options.addWidget(self.tray_check)
+        self.startup_check = QCheckBox("开机自启动（登录 Windows 后在托盘运行）")
+        try:
+            startup_enabled = windows_startup.is_enabled() if not self.demo else False
+        except OSError:
+            startup_enabled = False
+        self.startup_check.setChecked(startup_enabled)
+        self.startup_check.toggled.connect(self.startup_changed)
+        options.addWidget(self.startup_check)
+        options.addWidget(text("自启动后沿用已保存的自动重连、定时与主备账号设置。", "muted"))
         options.addWidget(text("主账号最多 3 次，备用账号最多 3 次；全部失败后暂停。", "muted"))
         layout.addWidget(policy)
         layout.addStretch()
@@ -647,6 +657,21 @@ class Window(QMainWindow):
         self.settings["close_to_tray"] = enabled
         if not self.demo:
             backend.save_settings(self.settings)
+
+    def startup_changed(self, enabled):
+        if self.demo:
+            return
+        try:
+            windows_startup.set_enabled(enabled)
+        except OSError:
+            self.startup_check.blockSignals(True)
+            self.startup_check.setChecked(not enabled)
+            self.startup_check.blockSignals(False)
+            self.notice.setText("无法修改开机自启动，请检查当前用户权限后重试。")
+            self.add_log("开机自启动设置未能保存。", "error")
+            return
+        self.add_log("已开启开机自启动。" if enabled else "已关闭开机自启动。")
+        self.notice.setText("已开启：下次登录 Windows 后在托盘启动助手。" if enabled else "已关闭开机自启动。")
 
     def set_busy(self, busy):
         self.busy = busy
@@ -886,11 +911,14 @@ class Window(QMainWindow):
             self.schedule_timer.stop()
             self.tray.hide()
             event.accept()
+            if getattr(self, "background_launch", False):
+                QTimer.singleShot(0, QApplication.instance().quit)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--preview", type=Path, help="Render an offline demo screenshot and exit.")
+    parser.add_argument("--startup", action="store_true", help="Start quietly in the tray after Windows login.")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     for filename in ("msyh.ttc", "msyhbd.ttc", "segoeui.ttf"):
@@ -905,10 +933,11 @@ def main():
         lock = QLockFile(str(backend.STATE / "desktop.lock"))
         lock.setStaleLockTime(0)
         if not lock.tryLock(100):
-            QMessageBox.information(None, "YSUNet", "校园网助手已经运行，请从任务栏或托盘打开。")
+            if not args.startup:
+                QMessageBox.information(None, "YSUNet", "校园网助手已经运行，请从任务栏或托盘打开。")
             return 0
     window = Window(demo=bool(args.preview))
-    window.show()
+    windows_startup.show_initial_window(window, startup=args.startup and not args.preview)
     if args.preview:
         def capture():
             window.grab().save(str(args.preview))
