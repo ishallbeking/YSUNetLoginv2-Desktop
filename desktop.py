@@ -123,7 +123,7 @@ class Window(QMainWindow):
         super().__init__()
         self.demo = demo
         self.settings = backend.load_settings() if not demo else {"auto_reconnect": False, "interval": 30, "close_to_tray": False}
-        self.policy = backend.RetryPolicy()
+        self.policy = backend.RetryPolicy(backup_available=backend.backup_available())
         self.next_scheduled = time.monotonic() + self.settings.get("schedule_minutes", 60) * 60
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
@@ -353,7 +353,7 @@ class Window(QMainWindow):
         account = QVBoxLayout(account_card)
         account.setContentsMargins(24, 22, 24, 22)
         account.setSpacing(11)
-        account.addWidget(text("校园网账号", "sectionTitle"))
+        account.addWidget(text("主账号", "sectionTitle"))
         account.addWidget(text("读取本目录 zc.txt；点击保存后更新原文件。", "muted"))
         self.username = QLineEdit()
         self.username.setPlaceholderText("校园网账号")
@@ -375,6 +375,39 @@ class Window(QMainWindow):
         row.addStretch()
         account.addLayout(row)
         layout.addWidget(account_card)
+        backup_card = card()
+        backup = QVBoxLayout(backup_card)
+        backup.setContentsMargins(24, 22, 24, 22)
+        backup.setSpacing(11)
+        backup.addWidget(text("备用账号", "sectionTitle"))
+        backup.addWidget(text("主账号失败 3 次后，再用备用账号尝试 3 次。", "muted"))
+        self.backup_check = QCheckBox("启用备用账号")
+        self.backup_check.setChecked(self.settings.get("backup_enabled", False))
+        self.backup_check.toggled.connect(self.toggle_backup)
+        backup.addWidget(self.backup_check)
+        self.backup_username = QLineEdit()
+        self.backup_username.setPlaceholderText("备用校园网账号")
+        self.backup_password = QLineEdit()
+        self.backup_password.setEchoMode(QLineEdit.Password)
+        self.backup_password.setPlaceholderText("备用校园网密码")
+        self.backup_service = QComboBox()
+        self.backup_service.addItems(backend.SERVICES)
+        backup.addWidget(text("备用账号", "muted"))
+        backup.addWidget(self.backup_username)
+        backup.addWidget(text("备用密码", "muted"))
+        backup.addWidget(self.backup_password)
+        backup.addWidget(text("备用运营商 / 网络服务", "muted"))
+        backup.addWidget(self.backup_service)
+        row = QHBoxLayout()
+        self.save_backup_button = button("保存并启用备用账号", True)
+        self.save_backup_button.clicked.connect(self.save_backup)
+        self.delete_backup_button = button("删除备用账号")
+        self.delete_backup_button.clicked.connect(self.delete_backup)
+        row.addWidget(self.save_backup_button)
+        row.addWidget(self.delete_backup_button)
+        row.addStretch()
+        backup.addLayout(row)
+        layout.addWidget(backup_card)
         policy = card()
         options = QVBoxLayout(policy)
         options.setContentsMargins(24, 20, 24, 20)
@@ -405,7 +438,7 @@ class Window(QMainWindow):
         self.tray_check.setChecked(self.settings["close_to_tray"])
         self.tray_check.toggled.connect(self.tray_changed)
         options.addWidget(self.tray_check)
-        options.addWidget(text("自动重连连续失败 3 次后暂停；重新开启可恢复。", "muted"))
+        options.addWidget(text("主账号最多 3 次，备用账号最多 3 次；全部失败后暂停。", "muted"))
         layout.addWidget(policy)
         layout.addStretch()
         self.add_page(page)
@@ -449,6 +482,15 @@ class Window(QMainWindow):
         self.activateWindow()
 
     def load_account(self):
+        if not self.demo:
+            try:
+                backup = backend.backup_credentials(enabled_only=False)
+                if backup:
+                    self.backup_username.setText(backup[0])
+                    self.backup_password.setText(backup[1])
+                    self.backup_service.setCurrentText(backup[2])
+            except (OSError, ValueError):
+                self.notice.setText("备用账号文件无法读取，请重新保存备用账号。")
         if self.demo:
             self.username.setText("demo-campus-user")
             self.password.setText("demo-only")
@@ -486,13 +528,77 @@ class Window(QMainWindow):
             self.refresh()
 
     def update_auto_detail(self):
-        if self.policy.failures >= 3:
-            value = "已暂停 · 连续失败 3 次，请核对账号后重新开启"
+        if self.policy.exhausted:
+            value = ("已暂停 · 主账号和备用账号各失败 3 次" if self.policy.backup_available
+                     else "已暂停 · 主账号失败 3 次，未启用备用账号")
         elif self.settings["auto_reconnect"]:
-            value = "已开启 · 每 {} 秒检查一次，失败后逐步延长重试间隔".format(self.settings["interval"])
+            profile = "备用账号" if self.policy.profile == "backup" else "主账号"
+            value = "已开启 · 每 {} 秒检查 · {}已失败 {}/3 次".format(
+                self.settings["interval"], profile, self.policy.counts[self.policy.profile])
         else:
             value = "关闭 · 仅手动连接"
         self.auto_detail.setText(value)
+
+    def save_backup(self):
+        if self.busy or self.cycle_path or self.demo:
+            return
+        try:
+            backend.save_credentials(self.backup_username.text(), self.backup_password.text(),
+                                     self.backup_service.currentText(), backend.BACKUP_PATH)
+            self.settings["backup_enabled"] = True
+            backend.save_settings(self.settings)
+        except (ValueError, OSError):
+            self.notice.setText("备用账号保存失败，请填写完整账号、密码和运营商。")
+            return
+        self.backup_check.blockSignals(True)
+        self.backup_check.setChecked(True)
+        self.backup_check.blockSignals(False)
+        self.policy.configure_backup(backend.backup_available())
+        self.policy.reset()
+        self.update_auto_detail()
+        self.add_log("备用账号已保存并启用；主账号失败 3 次后自动切换。")
+        self.notice.setText("备用账号已启用，主账号和备用账号各最多尝试 3 次。")
+        self.refresh()
+
+    def toggle_backup(self, enabled):
+        if self.demo:
+            return
+        if enabled:
+            try:
+                configured = backend.backup_credentials(enabled_only=False)
+            except (ValueError, OSError):
+                configured = None
+            if not configured:
+                self.backup_check.blockSignals(True)
+                self.backup_check.setChecked(False)
+                self.backup_check.blockSignals(False)
+                self.notice.setText("请先填写备用账号，再点击「保存并启用备用账号」。")
+                return
+        self.settings["backup_enabled"] = enabled
+        backend.save_settings(self.settings)
+        self.policy.configure_backup(backend.backup_available())
+        self.update_auto_detail()
+        self.add_log("已启用备用账号。" if enabled else "已停用备用账号，保留已保存的配置。")
+        self.refresh()
+
+    def delete_backup(self):
+        if self.busy or self.cycle_path or self.demo:
+            return
+        try:
+            backend.BACKUP_PATH.unlink(missing_ok=True)
+        except OSError:
+            self.notice.setText("无法删除备用账号文件，请检查文件权限。")
+            return
+        self.backup_check.setChecked(False)
+        self.settings["backup_enabled"] = False
+        backend.save_settings(self.settings)
+        self.backup_username.clear()
+        self.backup_password.clear()
+        self.policy.configure_backup(False)
+        self.update_auto_detail()
+        self.add_log("备用账号已删除。")
+        self.notice.setText("已删除备用账号；主账号保持不变。")
+
 
     def toggle_schedule(self, enabled):
         self.settings["scheduled_reconnect"] = enabled
@@ -527,7 +633,8 @@ class Window(QMainWindow):
                 self.add_log("在线账号与配置不同，定时主动重连已暂停。", "warning")
         else:
             self.next_scheduled = time.monotonic() + self.settings["schedule_minutes"] * 60
-            self.start("login")
+            if self.policy.allowed(True, False, self.busy):
+                self.start("login", automatic=True)
 
     def interval_changed(self, value):
         self.settings["interval"] = value
@@ -545,7 +652,9 @@ class Window(QMainWindow):
         self.busy = busy
         for widget in (self.login_button, self.logout_button, self.check_button, self.refresh_button,
                        self.cycle_button, self.save_account_button, self.username, self.password,
-                       self.service, self.auto_check, self.schedule_check):
+                       self.service, self.auto_check, self.schedule_check,
+                       self.backup_check, self.backup_username, self.backup_password,
+                       self.backup_service, self.save_backup_button, self.delete_backup_button):
             widget.setEnabled(not busy and not self.cycle_path)
         if not busy and self.last_state and not self.cycle_path:
             online = self.last_state["online"]
@@ -556,19 +665,23 @@ class Window(QMainWindow):
     def start(self, action, automatic=False):
         if self.demo or self.busy or self.cycle_path:
             return
+        if action == "login" and not automatic:
+            self.policy.reset()
+        profile = self.policy.profile if automatic else "primary"
+        self.attempt_profile = profile
+        if automatic and self.policy.exhausted:
+            return
         if action in ("login", "logout"):
             # Coordinate with the standalone reconnect worker and guardian.
             def operation():
                 import reconnect
                 with reconnect.operation_lock():
-                    return backend.network_operation(action)
+                    return backend.network_operation(action, profile=profile)
         else:
             operation = lambda: backend.network_operation(action)
         self.set_busy(True)
         if action != "status":
             self.notice.setText({"login": "正在连接校园网…", "logout": "正在断开连接…", "diagnose": "正在检测校园网与外网连通性…"}[action])
-        if action == "login" and not automatic:
-            self.policy.reset()
         task = Task("auto_login" if automatic else action, operation)
         task.signals.done.connect(self.task_done)
         self.pool.start(task)
@@ -582,9 +695,16 @@ class Window(QMainWindow):
                 self.badge.setText("状态未知")
                 self.hero_description.setText(error)
             if action == "auto_login":
+                previous_profile = self.policy.profile
                 self.policy.failed(self.settings["interval"])
-                if self.policy.failures >= 3:
-                    self.add_log("自动重连连续失败 3 次，已暂停；请核对账号配置。", "warning")
+                if previous_profile == "primary" and self.policy.profile == "backup":
+                    self.add_log("主账号连续失败 3 次，将切换备用账号尝试（最多 3 次）。", "warning")
+                    self.notice.setText("主账号连续失败 3 次，下一次重连将使用备用账号。")
+                elif self.policy.exhausted:
+                    message = ("主账号和备用账号各失败 3 次，自动重连已暂停。"
+                               if self.policy.backup_available else "主账号失败 3 次，未启用备用账号，已暂停。")
+                    self.add_log(message, "warning")
+                    self.notice.setText(message)
             self.add_log(error, "error")
         else:
             state = result["state"]
@@ -597,7 +717,8 @@ class Window(QMainWindow):
             if action in ("login", "auto_login"):
                 self.policy.reset()
                 self.notice.setText("已连接校园网，账号与运营商验证通过。")
-                self.add_log("校园网登录成功，账号与运营商匹配。")
+                self.add_log(("备用账号" if state.get("account_profile") == "backup" else "主账号")
+                             + "登录成功，账号与运营商匹配。")
             elif action == "logout":
                 self.notice.setText("已断开校园网，自动重连已关闭。")
                 self.add_log("校园网已登出。")
@@ -618,7 +739,8 @@ class Window(QMainWindow):
         matched = state["account_matches"] and state["service_matches"]
         self.hero_title.setText("校园网已连接" if online else "校园网未连接")
         self.hero_description.setText(
-            ("连接稳定，开始你的学习与探索。" if matched else "当前在线账号或运营商与配置不同，请先核对。")
+            (("正在使用备用账号，网络连接正常。" if state.get("account_profile") == "backup"
+              else "连接稳定，开始你的学习与探索。") if matched else "当前在线账号或运营商与配置不同，请先核对。")
             if online else "确认已接入校园网后，点击下方按钮登录。"
         )
         self.badge.setText("●  已在线" if online else "○  未连接")
@@ -633,7 +755,7 @@ class Window(QMainWindow):
             self.internet_value.setText("外网连通    未检测")
         if previous and previous["online"] != online:
             self.add_log("状态变化：校园网已上线。" if online else "状态变化：校园网已离线。")
-        if online:
+        if online and matched:
             self.policy.reset()
         self.update_auto_detail()
 
@@ -713,6 +835,8 @@ class Window(QMainWindow):
         self.next_scheduled = time.monotonic() + self.settings.get("schedule_minutes", 60) * 60
         if level == "error":
             self.schedule_check.setChecked(False)
+            self.policy.exhaust()
+            self.update_auto_detail()
         self.set_busy(False)
         self.notice.setText(message)
         self.add_log(message, level)

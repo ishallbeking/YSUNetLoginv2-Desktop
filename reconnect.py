@@ -15,6 +15,7 @@ import uuid
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from local_client import read_credentials, online_summary, internet_check
+from account_profiles import available_profiles
 from ysu_net_login.ruijie_client import RuijieClient
 from functools import partial
 
@@ -33,10 +34,8 @@ def make_client():
 
 
 def clean_error(error, credentials):
-    message = str(error)
-    for secret in credentials[:2]:
-        message = message.replace(secret, "[REDACTED]")
-    return {"error_type": type(error).__name__, "error": message}
+    # Server responses can echo credentials or tickets from either profile.
+    return {"error_type": type(error).__name__, "error": "Connection or authentication operation failed."}
 
 
 def write_json(path, data):
@@ -55,8 +54,12 @@ def publish(directory, report, event):
 
 def check_identity(client, credentials):
     state, username = online_summary(client)
-    state["account_matches"] = username == credentials[0]
-    state["service_matches"] = state["service"] == credentials[2]
+    profiles = available_profiles(credentials)
+    matched = next(((name, values) for name, values in profiles
+                    if username == values[0] and state["service"] == values[2]), None)
+    state["account_matches"] = any(username == values[0] for _, values in profiles)
+    state["service_matches"] = bool(matched)
+    state["account_profile"] = matched[0] if matched else None
     return state
 
 
@@ -66,6 +69,7 @@ def expected_online(state):
 
 @contextmanager
 def operation_lock():
+    (ROOT / ".deployment").mkdir(exist_ok=True)
     with (ROOT / ".deployment" / "reconnect.lock").open("a+b") as stream:
         stream.seek(0, 2)
         if stream.tell() == 0:
@@ -102,37 +106,63 @@ def instrument_authentication(client, report, emit):
 
 
 def restore_connection(credentials, report, emit, attempts=3):
-    for attempt in range(1, attempts + 1):
-        entry = {"attempt": attempt}
-        report.setdefault("reconnect_attempts", []).append(entry)
-        emit("reconnect_attempt")
-        client = make_client()
-        instrument_authentication(client, report, emit)
+    profiles = available_profiles(credentials)
+    counts = report.setdefault("attempt_counts", {"primary": 0, "backup": 0})
+    # A guardian may resume after the worker logged in but before it recorded
+    # success. Verify the existing connection before consuming another attempt.
+    if any(counts.values()):
+        check = make_client()
         try:
-            entry["before"] = check_identity(client, credentials)
-            if not expected_online(entry["before"]):
-                report["login_attempted"] = True
-                emit("project_login_start")
-                try:
-                    entry["client_login_success"] = client.login(*credentials)
-                except Exception as error:
-                    entry.update(clean_error(error, credentials))
-            entry["after"] = check_identity(client, credentials)
-            if expected_online(entry["after"]):
-                entry["internet"] = [internet_check(url) for url in URLS]
-                if all(item["passed"] for item in entry["internet"]):
-                    report["after"] = entry["after"]
-                    report["internet"] = entry["internet"]
-                    report["restored"] = True
+            state = check_identity(check, credentials)
+            if expected_online(state):
+                internet = [internet_check(url) for url in URLS]
+                if all(item["passed"] for item in internet):
+                    report.update(after=state, internet=internet, restored=True)
                     emit("connection_restored")
                     return True
-        except Exception as error:
-            entry.update(clean_error(error, credentials))
+        except Exception:
+            pass
         finally:
-            client.client.close()
-        emit("reconnect_attempt_failed")
-        if attempt < attempts:
-            time.sleep(attempt * 3)
+            check.client.close()
+    for profile, selected in profiles:
+        if profile == "backup" and counts.get("primary", 0) >= attempts:
+            emit("switch_to_backup_account")
+        for attempt in range(counts.get(profile, 0) + 1, attempts + 1):
+            counts[profile] = attempt
+            entry = {"attempt": attempt, "account_profile": profile}
+            report.setdefault("reconnect_attempts", []).append(entry)
+            # Persist the budget before performing requests, so a crashed
+            # worker cannot restart the same three attempts in the guardian.
+            emit("reconnect_attempt")
+            client = make_client()
+            instrument_authentication(client, report, emit)
+            try:
+                entry["before"] = check_identity(client, credentials)
+                if entry["before"]["online"] and not expected_online(entry["before"]):
+                    raise RuntimeError("An unrelated account is already online")
+                if not expected_online(entry["before"]):
+                    report["login_attempted"] = True
+                    emit("project_login_start")
+                    try:
+                        entry["client_login_success"] = client.login(*selected)
+                    except Exception as error:
+                        entry.update(clean_error(error, selected))
+                entry["after"] = check_identity(client, credentials)
+                if expected_online(entry["after"]):
+                    entry["internet"] = [internet_check(url) for url in URLS]
+                    if all(item["passed"] for item in entry["internet"]):
+                        report["after"] = entry["after"]
+                        report["internet"] = entry["internet"]
+                        report["restored"] = True
+                        emit("connection_restored")
+                        return True
+            except Exception as error:
+                entry.update(clean_error(error, selected))
+            finally:
+                client.client.close()
+            emit("reconnect_attempt_failed")
+            if attempt < attempts:
+                time.sleep(attempt * 3)
     report["restored"] = False
     return False
 
@@ -201,7 +231,7 @@ def guard(directory, worker_pid):
     if not handle:
         raise OSError("Cannot monitor reconnect worker.")
     write_json(directory / "guard-ready.json", {"pid": __import__("os").getpid(), "ready": True})
-    deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 360
     report = {}
     try:
         while time.monotonic() < deadline:
@@ -288,6 +318,7 @@ def main():
         with operation_lock():
             return worker(args.worker, args.dry_run)
     preflight()
+    (ROOT / ".deployment").mkdir(exist_ok=True)
     directory = ROOT / ".deployment" / ("reconnect-" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6])
     directory.mkdir()
     arguments = ["--worker", str(directory)]

@@ -218,3 +218,7 @@ zc.tmp
 .env.*
 *.log
 .publish/
+
+# Local backup account credentials
+zc.backup.txt
+zc.backup.tmp
