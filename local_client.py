@@ -13,11 +13,29 @@ from ysu_net_login.config import Config, resolve_service_name
 from ysu_net_login.ruijie_client import RuijieClient
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_CREDENTIALS = ROOT / "zc.txt"
+DEFAULT_CREDENTIALS = ROOT / "credentials.txt"
+
+
+def migrate_credentials(path):
+    """Rename a legacy local profile lazily, keeping an existing new file."""
+    path = Path(path)
+    legacy_name = {
+        "credentials.txt": "zc.txt",
+        "credentials.backup.txt": "zc.backup.txt",
+    }.get(path.name)
+    if legacy_name and not path.exists():
+        legacy = path.with_name(legacy_name)
+        try:
+            # Windows rename fails if the destination already exists.
+            legacy.rename(path)
+        except (FileNotFoundError, FileExistsError):
+            # Missing legacy files and concurrent migrations are harmless.
+            pass
+    return path
 
 
 def read_credentials(path):
-    data = path.read_bytes()
+    data = migrate_credentials(path).read_bytes()
     encodings = ("utf-16",) if data.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-8-sig", "gb18030")
     for encoding in encodings:
         try:
@@ -28,7 +46,7 @@ def read_credentials(path):
     else:
         raise ValueError("Cannot decode the credential file.")
     if len(lines) != 3:
-        raise ValueError("zc.txt must contain username, password, and operator on three lines.")
+        raise ValueError("credentials.txt must contain username, password, and operator on three lines.")
     username, password, operator = lines
     aliases = {"电信": "telecom", "联通": "unicom", "移动": "mobile"}
     service = resolve_service_name(aliases.get(operator, operator), Config())
@@ -63,7 +81,7 @@ def internet_check(url):
 def main():
     if sys.stdout is not None:
         sys.stdout.reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="YSU campus network launcher; reads zc.txt directly.")
+    parser = argparse.ArgumentParser(description="YSU campus network launcher; reads credentials.txt directly.")
     parser.add_argument("command", nargs="?", choices=("login", "status", "verify"), default="login")
     parser.add_argument("--credentials", type=Path, default=DEFAULT_CREDENTIALS)
     args = parser.parse_args()

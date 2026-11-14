@@ -252,7 +252,7 @@ def guard(directory, worker_pid):
             if not kernel.TerminateProcess(handle, 1):
                 raise OSError("Cannot stop stalled reconnect worker.")
             kernel.WaitForSingleObject(handle, 5000)
-        credentials = read_credentials(ROOT / "zc.txt")
+        credentials = read_credentials(ROOT / "credentials.txt")
         report["phase"] = "guard_recovery"
         report["guard_recovery"] = True
         emit = lambda event: publish(directory, report, event)
@@ -268,7 +268,7 @@ def guard(directory, worker_pid):
 
 
 def preflight():
-    credentials = read_credentials(ROOT / "zc.txt")
+    credentials = read_credentials(ROOT / "credentials.txt")
     client = make_client()
     try:
         state = check_identity(client, credentials)

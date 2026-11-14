@@ -5,7 +5,7 @@ from pathlib import Path
 from local_client import read_credentials
 
 ROOT = Path(__file__).resolve().parent
-BACKUP_PATH = ROOT / "zc.backup.txt"
+BACKUP_PATH = ROOT / "credentials.backup.txt"
 SETTINGS_PATH = ROOT / ".deployment" / "desktop-settings.json"
 
 
@@ -24,7 +24,7 @@ def backup_credentials(enabled_only=True):
 
 
 def available_profiles(primary=None):
-    primary = primary if primary is not None else read_credentials(ROOT / "zc.txt")
+    primary = primary if primary is not None else read_credentials(ROOT / "credentials.txt")
     result = [("primary", primary)]
     try:
         backup = backup_credentials()

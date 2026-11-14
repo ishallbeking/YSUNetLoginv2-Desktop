@@ -212,7 +212,6 @@ TECH.md
 zc.txt
 
 # Publish dependency lists and templates, never local credentials
-zc.txt
 zc.tmp
 .env
 .env.*
@@ -222,3 +221,9 @@ zc.tmp
 # Local backup account credentials
 zc.backup.txt
 zc.backup.tmp
+
+# Local account credentials and atomic-save files
+credentials.txt
+credentials.tmp
+credentials.backup.txt
+credentials.backup.tmp

@@ -28,7 +28,7 @@ class StartupTests(unittest.TestCase):
             free = ctypes.windll.kernel32.LocalFree
             free.argtypes = [ctypes.c_void_p]
             free(ctypes.cast(args, ctypes.c_void_p))
-        self.assertNotIn("zc.txt", command)
+        self.assertNotIn("credentials.txt", command)
         self.assertNotIn("password", command)
 
     def test_registration_round_trip_in_isolated_non_startup_key(self):

@@ -45,7 +45,7 @@ class DesktopPolicyTests(unittest.TestCase):
 
     def test_save_rejects_newlines_and_preserves_original(self):
         with tempfile.TemporaryDirectory(dir=ROOT / ".deployment") as directory:
-            path = Path(directory) / "zc.txt"
+            path = Path(directory) / "credentials.txt"
             backend.save_credentials("test-account", "test-password", "中国电信", path)
             self.assertEqual(backend.read_credentials(path), ("test-account", "test-password", "中国电信"))
             previous = path.read_bytes()

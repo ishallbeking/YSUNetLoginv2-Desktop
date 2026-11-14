@@ -9,7 +9,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-from local_client import read_credentials, internet_check
+from local_client import read_credentials, internet_check, migrate_credentials
 from ysu_net_login.ruijie_client import RuijieClient
 from account_profiles import available_profiles, backup_credentials, backup_available, BACKUP_PATH
 
@@ -55,7 +55,7 @@ def save_settings(settings):
 
 
 def save_credentials(username, password, service, path=None):
-    destination = path or ROOT / "zc.txt"
+    destination = migrate_credentials(path or ROOT / "credentials.txt")
     if not username.strip() or not password or service not in SERVICES:
         raise ValueError("请输入完整账号、密码并选择运营商。")
     if any("\n" in value or "\r" in value for value in (username, password, service)):
@@ -69,7 +69,7 @@ def save_credentials(username, password, service, path=None):
 
 
 def credentials():
-    return read_credentials(ROOT / "zc.txt")
+    return read_credentials(ROOT / "credentials.txt")
 
 
 def error_message(error):
@@ -80,7 +80,7 @@ def error_message(error):
     if isinstance(error, requests.ConnectionError):
         return "无法连接认证服务器，请确认已连接校园网。"
     if isinstance(error, FileNotFoundError):
-        return "未找到 zc.txt，请先在账号设置中保存账号。"
+        return "未找到 credentials.txt，请先在账号设置中保存账号。"
     if isinstance(error, ValueError):
         return "账号配置或服务器响应有误，请检查设置。"
     return "操作未完成，请核对账号密码、运营商及校园网连接。"

@@ -355,7 +355,7 @@ class Window(QMainWindow):
         account.setContentsMargins(24, 22, 24, 22)
         account.setSpacing(11)
         account.addWidget(text("主账号", "sectionTitle"))
-        account.addWidget(text("读取本目录 zc.txt；点击保存后更新原文件。", "muted"))
+        account.addWidget(text("读取本目录 credentials.txt；点击保存后更新原文件。", "muted"))
         self.username = QLineEdit()
         self.username.setPlaceholderText("校园网账号")
         self.password = QLineEdit()
